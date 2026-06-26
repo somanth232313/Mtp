@@ -1,0 +1,7 @@
+torch
+transformers
+opencv-python
+moviepy
+librosa
+numpy
+pillow

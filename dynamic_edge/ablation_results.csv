@@ -1,0 +1,5 @@
+Method,Video,Query,Latency_s,Relevance_Score,Peak_VRAM_MB
+Uniform Baseline,real_sample_1.mp4,a cartoon rabbit,0.02,0.2413,529.74
+Dynamic Edge,real_sample_1.mp4,a cartoon rabbit,0.37,0.2407,1212.93
+Uniform Baseline,real_sample_2.mp4,a flying bird,0.05,0.223,1209.33
+Dynamic Edge,real_sample_2.mp4,a flying bird,1.26,0.239,1232.33

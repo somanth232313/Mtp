@@ -1,6 +1,12 @@
 import cv2
+import numpy as np
 from typing import List
 from query_analyzer import TemporalClass
+
+try:
+    from moviepy.editor import VideoFileClip
+except ImportError:
+    VideoFileClip = None
 
 class DynamicSegmenter:
     def __init__(self, base_M: int = 64):
@@ -30,7 +36,8 @@ class DynamicSegmenter:
     def extract_candidate_frames(self, video_path: str, temporal_class: TemporalClass) -> List[dict]:
         """
         Dynamically divides the video into M segments and extracts the central frame of each.
-        Returns a list of dictionaries with frame info.
+        Also extracts a 2-second audio chunk around the frame if audio exists.
+        Returns a list of dictionaries with frame and audio info.
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -44,6 +51,18 @@ class DynamicSegmenter:
         M = self.determine_M(temporal_class, video_length_sec)
         print(f"Video Length: {video_length_sec:.2f}s. Dynamic M determined as: {M}")
         
+        # Check for audio
+        has_audio = False
+        video_clip = None
+        if VideoFileClip is not None:
+            try:
+                video_clip = VideoFileClip(video_path)
+                if video_clip.audio is not None:
+                    has_audio = True
+                    print(f"Audio track found! Will extract audio chunks.")
+            except Exception as e:
+                print(f"Note: Could not load audio track (maybe there isn't one). {e}")
+
         frames = []
         if total_frames == 0 or M == 0:
             return frames
@@ -62,13 +81,35 @@ class DynamicSegmenter:
             if ret:
                 # Convert BGR to RGB for standard processing
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                center_timestamp_sec = center_frame_idx / fps
+                
+                # Extract audio chunk (+/- 1 second)
+                audio_array = None
+                if has_audio and video_clip.audio is not None:
+                    start_t = max(0, center_timestamp_sec - 1.0)
+                    end_t = min(video_clip.duration, center_timestamp_sec + 1.0)
+                    if start_t < end_t:
+                        try:
+                            audio_subclip = video_clip.audio.subclip(start_t, end_t)
+                            # CLAP uses 48kHz by default
+                            audio_array = audio_subclip.to_soundarray(fps=48000)
+                            # Convert to mono if it's stereo
+                            if len(audio_array.shape) > 1 and audio_array.shape[1] > 1:
+                                audio_array = audio_array.mean(axis=1)
+                        except Exception as e:
+                            # Silently fail for audio chunk errors to not spam
+                            pass
+
                 frames.append({
                     'frame_idx': center_frame_idx,
-                    'timestamp_sec': center_frame_idx / fps,
-                    'image': frame_rgb
+                    'timestamp_sec': center_timestamp_sec,
+                    'image': frame_rgb,
+                    'audio': audio_array
                 })
                 
         cap.release()
+        if video_clip is not None:
+            video_clip.close()
         return frames
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+Method,Video,Query,Latency_s,Peak_Relevance_Score,Peak_VRAM_MB
+Uniform Baseline,sparse_action_test.mp4,a bright white circle,0.02,0.2685,530.19
+Dynamic Edge,sparse_action_test.mp4,a bright white circle,0.38,0.3459,1213.86
