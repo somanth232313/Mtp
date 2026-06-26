@@ -95,6 +95,8 @@
 \usepackage{graphicx}
 \usepackage{amsmath}
 \usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
 \usepackage[colorlinks=true, linkcolor=primary, citecolor=secondary, urlcolor=accent]{hyperref}
 \usepackage{booktabs}
 \usepackage{caption}
@@ -169,31 +171,79 @@ Current systems employ uniform temporal downsampling (e.g., 0.5 fps). While this
 \end{contributionbox}
 
 % --- CHAPTER 2 ---
-\chapter{System Architecture \& Methodology}
+\chapter{Theoretical Framework \& Mathematical Formulations}
 
-\section{Deep Implementation Details}
-To bridge the gap between theoretical models and real-world deployment on constrained hardware, this thesis implements a highly optimized PyTorch and OpenCV pipeline. The following subsections detail the exact implementation logic required to run massive AI models within a strict 4GB VRAM limit.
+To strictly prove the viability and robustness of our proposed architecture, we formalize the problem mathematically and detail the core equations that govern the AI pipeline executing on the edge device.
 
-\subsection{Query Analyzer Implementation (DistilBERT)}
-The natural language query is first processed by \texttt{query\_analyzer.py}. Loading a full Large Language Model on the edge is impossible. Therefore, we utilize the \texttt{distilbert-base-uncased} model from the HuggingFace Transformers library. 
-To preserve VRAM, the DistilBERT sequence classifier is instantiated entirely on the CPU by default, as the inference latency for a 10-word text string on a modern edge CPU is under 50ms. The text is tokenized, padded to a maximum length, and passed through the 6-layer transformer block. Based on the predicted logits, the query is categorized as \texttt{action} or \texttt{static}, directly modifying the chunk multiplier $M$.
+\section{Formalization of the IoT Video Stream}
+Let a continuous video stream be defined as a set of sequentially ordered visual frames over time $T$, denoted as $\mathcal{V} = \{f_1, f_2, ..., f_K\}$, where $K$ is the total number of frames. In a standard 30 fps stream, $K = 30 \times T$.
+Given an edge transmission bandwidth constraint $B$ and a natural language query $Q$, our objective is to define a dynamic mapping function $\Phi$ that extracts an optimal subset $\mathcal{S} \subset \mathcal{V}$ such that $|\mathcal{S}| = N$, where $N \ll K$, maximizing the semantic relevance between $\mathcal{S}$ and $Q$.
 
-\subsection{Dynamic OpenCV Segmenter}
-Video decoding is a highly memory-intensive operation. The naive approach of loading an entire video into memory as a NumPy array immediately causes an Out-Of-Memory (OOM) crash on 4GB GPUs.
-Our implementation in \texttt{dynamic\_segmenter.py} mitigates this by streaming the video. We utilize the \texttt{cv2.VideoCapture} API to stream the MP4 file. Once $M$ is calculated by the Query Analyzer, we compute the target frame indices using a linear spacing algorithm: \texttt{np.linspace(0, total\_frames - 1, M)}. 
-The script then fast-forwards through the video stream, explicitly decoding \textit{only} the frames matching our target indices. This ensures that peak system RAM never exceeds the size of $M$ individual frames (approx. 50MB).
-
-\subsection{Semantic Frame Selection (CLIP \& PyTorch MMR)}
-The core semantic filtering is executed in \texttt{edge\_frame\_selection.py}. We utilize OpenAI's \texttt{ViT-B/32} CLIP architecture. 
-To fit CLIP into our 4GB GPU, the model is cast to half-precision (\texttt{FP16}) using PyTorch's \texttt{.half()} method, drastically cutting memory overhead. 
-
-We generate the visual embeddings $E_v$ and the text embedding $E_q$. Instead of running a simple max-cosine similarity, we implemented a sophisticated Maximal Marginal Relevance (MMR) loop using native PyTorch matrix operations. 
-The algorithm iteratively selects frames. In each loop, we calculate the similarity vector \texttt{sim\_q = F.cosine\_similarity(text\_features, unselected\_features)}. We then compute the cross-similarity between the unselected frames and the \textit{already selected} frames to find the maximum redundancy penalty \texttt{sim\_redundancy}. 
-The final selection metric is computed as:
+\section{DistilBERT Self-Attention for Query Parsing}
+To determine the temporal mapping multiplier $M$ (the number of candidate frames), we must parse the query $Q$ into a dense semantic embedding. We implement the DistilBERT architecture, which utilizes Multi-Head Self-Attention.
+The query $Q$ is tokenized into a sequence of input vectors $X \in \mathbb{R}^{L \times d_{model}}$. For each attention head, the query ($Q_K$), key ($K_K$), and value ($V_K$) matrices are computed:
 \begin{equation}
-score = \alpha \cdot \text{sim\_q} - \gamma \cdot \text{sim\_redundancy}
+Q_K = X W^Q, \quad K_K = X W^K, \quad V_K = X W^V
 \end{equation}
-The frame maximizing this score is moved to the selected pool. This batched tensor operation ensures the MMR ranking executes in less than 15 milliseconds.
+The scaled dot-product attention is then computed as:
+\begin{equation}
+\text{Attention}(Q_K, K_K, V_K) = \text{softmax}\left(\frac{Q_K K_K^T}{\sqrt{d_k}}\right) V_K
+\end{equation}
+The final representation of the \texttt{[CLS]} token is passed through a Softmax layer to yield the probability distribution $P(C_i | Q)$ across temporal classes $C \in \{\text{Fast-Action}, \text{Static}, \text{Long-Duration}\}$. We define the dynamic chunk size $M$ as a function of the maximum probability class:
+\begin{equation}
+M(Q) = \lambda_{base} \cdot \left(1 + \beta \cdot \mathbf{1}_{[\arg\max P(C_i | Q) = \text{Fast-Action}]}\right)
+\end{equation}
+where $\beta$ is the temporal scaling factor.
+
+\section{Joint Visual-Text Embedding Space (CLIP)}
+Once the $M$ candidate frames are extracted, denoted as $\mathcal{F} = \{f_1, ..., f_M\}$, we map them into a shared latent space alongside the query $Q$ using OpenAI's CLIP (Contrastive Language-Image Pretraining) model.
+Let $E_\text{text}$ be the Text Encoder and $E_\text{vis}$ be the Vision Transformer (ViT). We compute the $L2$-normalized embeddings:
+\begin{equation}
+\mathbf{q} = \frac{E_\text{text}(Q)}{\|E_\text{text}(Q)\|_2}, \quad \mathbf{v}_i = \frac{E_\text{vis}(f_i)}{\|E_\text{vis}(f_i)\|_2} \quad \forall i \in \{1, ..., M\}
+\end{equation}
+The semantic relevance is mathematically defined as the cosine similarity (dot product of normalized vectors):
+\begin{equation}
+S_{rel}(\mathbf{q}, \mathbf{v}_i) = \mathbf{q} \cdot \mathbf{v}_i^T
+\end{equation}
+
+\section{Maximal Marginal Relevance (MMR) Optimization}
+A naive selection of the Top-$N$ frames based solely on $S_{rel}$ results in heavy temporal redundancy (e.g., transmitting 4 nearly identical frames of a parked car). To ensure the cloud MLLM receives maximum entropy (information), we apply the Maximal Marginal Relevance (MMR) penalty.
+Let $\mathcal{S}$ be the set of currently selected frames, initialized as $\emptyset$. Let $\mathcal{U} = \mathcal{F} \setminus \mathcal{S}$ be the unselected frames. The next optimal frame $f^*$ is chosen by maximizing the objective function:
+\begin{equation}
+f^* = \arg\max_{f_i \in \mathcal{U}} \left[ \alpha \cdot (\mathbf{q} \cdot \mathbf{v}_i^T) - (1 - \alpha) \cdot \max_{f_j \in \mathcal{S}} (\mathbf{v}_i \cdot \mathbf{v}_j^T) \right]
+\end{equation}
+where $\alpha \in [0, 1]$ controls the trade-off between strict query relevance and visual diversity.
+
+\subsection{Computational Complexity Analysis}
+For an edge device, algorithm complexity is paramount. The computation of visual embeddings scales linearly: $O(M \times d_{model})$. The MMR selection loop executes in $O(N \times M \times d_{model})$ time. Because $N \ll M$, the overall complexity is extremely lightweight, scaling asymptotically at $O(M^2)$, ensuring the pipeline runs in sub-second time on restricted hardware.
+
+\section{System Algorithm}
+The entire edge curation pipeline is formalized in Algorithm \ref{alg:edge_pipeline}.
+
+\begin{algorithm}[H]
+\caption{Semantic-Aware Edge Filtering Pipeline}
+\label{alg:edge_pipeline}
+\begin{algorithmic}[1]
+\REQUIRE Video stream $\mathcal{V}$, Text query $Q$, Transmit budget $N$
+\ENSURE Transmitted optimal frame set $\mathcal{S}$
+\STATE $P(C_i) \leftarrow \text{DistilBERT\_Forward}(Q)$
+\STATE $M \leftarrow \text{CalculateDynamicChunks}(P(C_i), \text{Length}(\mathcal{V}))$
+\STATE $\mathcal{F} \leftarrow \emptyset$ \COMMENT{Candidate frame pool}
+\FOR{$i = 0$ \TO $M-1$}
+    \STATE $index \leftarrow \lfloor i \times \frac{\text{Length}(\mathcal{V})}{M} \rfloor$
+    \STATE $\mathcal{F} \leftarrow \mathcal{F} \cup \{\mathcal{V}[index]\}$
+\ENDFOR
+\STATE $\mathbf{q} \leftarrow \text{CLIP\_TextEncode}(Q)$
+\STATE $\mathbf{V}_{emb} \leftarrow \text{CLIP\_VisEncode}(\mathcal{F})$
+\STATE $\mathcal{S} \leftarrow \emptyset$
+\WHILE{$|\mathcal{S}| < N$}
+    \STATE $f^* \leftarrow \arg\max_{f_i} [ \alpha (\mathbf{q} \cdot \mathbf{v}_i) - (1-\alpha) \max_{f_j \in \mathcal{S}} (\mathbf{v}_i \cdot \mathbf{v}_j) ]$
+    \STATE $\mathcal{S} \leftarrow \mathcal{S} \cup \{f^*\}$
+    \STATE $\mathcal{F} \leftarrow \mathcal{F} \setminus \{f^*\}$
+\ENDWHILE
+\RETURN $\mathcal{S}$
+\end{algorithmic}
+\end{algorithm}
 
 % --- CHAPTER 3 ---
 \chapter{Experimental Evaluation \& Results}
